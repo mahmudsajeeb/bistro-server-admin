@@ -4,7 +4,7 @@ const port = process.env.PORT || 1000
 const jwt = require('jsonwebtoken')
 const app = express()
 require('dotenv').config()
-
+const stripe = require("stripe")(process.env.PAYMENT_TOKEN)
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
  
@@ -51,53 +51,50 @@ async function run() {
     const bistroDatabase = client.db("bistroDB").collection("menu")
     const reviewsDatabase = client.db("bistroDB").collection("reviews")
     const cartCollection = client.db("bistroDB").collection("carts")
+    const paymentsCollection = client.db("bistroDB").collection("payments")
 
     // json token // 
 
     app.post('/jwt',(req,res)=>{
       const user = req.body 
-      const token = jwt.sign(user,process.env.ACCESS_TOKEN,  { expiresIn: '1h' })
+      const token = jwt.sign(user,process.env.ACCESS_TOKEN,  { expiresIn: '88h' })
       res.send({token})
     })
+     // Warning: use verifyJWT before using verifyAdmin
+     const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded.email;
+      const query = { email: email }
+      const user = await userDatabase.findOne(query);
+      if (user?.role !== 'admin') {
+        return res.status(403).send({ error: true, message: 'forbidden message' });
+      }
+      next();
+    }
     //get the data 
     app.get("/menu",async(req,res)=>{
       const result = await bistroDatabase.find().toArray()
       res.send(result)
     })
 
-        // Warning: use verifyJWT before using verifyAdmin
-        const verifyAdmin = async (req, res, next) => {
-          const email = req.decoded.email;
-          const query = { email: email }
-          const user = await userDatabase.findOne(query);
-          if (user?.role !== 'admin') {
-            return res.status(403).send({ error: true, message: 'forbidden message' });
-          }
-          next();
-        }
+    // app.delete("/menu/:id",verifyJWT,verifyAdmin, async(req,res) =>{
+    //   const id = req.params.id 
+    //   const query = {_id: new ObjectId(id)}
+    //   const result = await bistroDatabase.deleteOne(query)
+    //   res.json(result)
+    // })
+
+    app.post("/menu",verifyJWT,verifyAdmin, async(req,res) =>{
+      const newItem = req.body 
+      const result = await bistroDatabase.insertOne(newItem)
+      res.send(result)
+    })
+       
     app.get("/users",verifyJWT, verifyAdmin, async(req,res)=>{
       const result = await userDatabase.find().toArray()
       res.send(result)
     })
 
-
-    // security layer: verifyJWT
-    // email same 
-    // check admin
-      // app.get("/users/admin/:email",verifyJWT, async(req,res) =>{
-      //   const email = req.params.email 
-      //   if(req.decoded.email !==email){
-      //     res.send({admin:false})
-      //   }
-      //   const query = {email:email}
-      //   const user = await userDatabase.findOne(query)
-      //   const result = {admin: user?.role ==='admin'}
-      //   res.send(result)
-      // })
-
-       // security layer: verifyJWT
-    // email same
-    // check admin
+ 
     app.get('/users/admin/:email', verifyJWT, async (req, res) => {
       const email = req.params.email;
 
@@ -136,7 +133,7 @@ async function run() {
       res.send(result)
     })
 
-    
+ 
     // pratice 
     // app.post("/userss", async(req,res)=>{
     //   const user = req.body 
@@ -176,6 +173,53 @@ async function run() {
       const query = {_id: new ObjectId(id)}
       const result = await cartCollection.deleteOne(query)
       res.send(result)
+    })
+
+
+
+    
+     // create payment intent
+     app.post('/create-payment-intent', verifyJWT, async (req, res) => {
+      const { price } = req.body;
+      const amount = price * 100;
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    })
+
+
+    // payment related api
+
+
+    app.post('/payments', verifyJWT, async(req, res) =>{
+      const payment = req.body;
+      const insertResult = await paymentsCollection.insertOne(payment);
+
+      const query = {_id: { $in: payment.cartItems.map(id => new ObjectId(id)) }}
+      const deleteResult = await cartCollection.deleteMany(query)
+
+      res.send({ insertResult, deleteResult});
+    })
+
+
+    app.get("/admin-stats",verifyJWT,verifyAdmin, async(req,res) =>{
+      const users = await userDatabase.estimatedDocumentCount()
+      const products = await bistroDatabase.estimatedDocumentCount()
+      const orders = await paymentsCollection.estimatedDocumentCount()
+      const payments = await paymentsCollection.find().toArray()
+      const revenue = payments.reduce((sum,payment) => sum + payment.price,0)
+      res.send({
+        revenue,
+        users,
+        products,
+        orders
+      })
     })
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
